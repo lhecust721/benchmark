@@ -4,8 +4,10 @@
 import argparse
 import json
 import random
+from collections import Counter
 from pathlib import Path
 from typing import Any
+
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
@@ -78,15 +80,17 @@ def estimate_final_prompt_tokens(
     pairs: list[tuple[dict[str, Any], dict[str, Any]]],
     output_tokens: int,
 ) -> int:
-    """Estimate the final request length when prior model outputs are fixed-size."""
+    """Estimate the final request using fixed-size prior model outputs.
+
+    Empty assistant messages retain chat-template control tokens. Generated
+    content is accounted for arithmetically so the estimate does not depend on
+    how a tokenizer splits a repeated placeholder string.
+    """
     messages = []
-    assistant_placeholder = " token" * output_tokens
     for turn_index, (human, _) in enumerate(pairs):
         messages.append({"role": "user", "content": human["value"]})
         if turn_index < len(pairs) - 1:
-            messages.append(
-                {"role": "assistant", "content": assistant_placeholder}
-            )
+            messages.append({"role": "assistant", "content": ""})
 
     try:
         token_ids = tokenizer.apply_chat_template(
@@ -94,12 +98,37 @@ def estimate_final_prompt_tokens(
             tokenize=True,
             add_generation_prompt=True,
         )
-        return len(token_ids)
-    except (AttributeError, TypeError, ValueError):
+        if hasattr(token_ids, "input_ids"):
+            token_ids = token_ids.input_ids
+        elif isinstance(token_ids, dict):
+            token_ids = token_ids["input_ids"]
+        if hasattr(token_ids, "tolist"):
+            token_ids = token_ids.tolist()
+        if token_ids and isinstance(token_ids[0], list):
+            token_ids = token_ids[0]
+        template_and_user_tokens = len(token_ids)
+    except (AttributeError, KeyError, TypeError, ValueError):
         rendered = "\n".join(
             f"{message['role']}: {message['content']}" for message in messages
         )
-        return len(tokenizer.encode(rendered, add_special_tokens=True))
+        template_and_user_tokens = len(
+            tokenizer.encode(rendered, add_special_tokens=True)
+        )
+
+    completed_assistant_turns = max(len(pairs) - 1, 0)
+    return template_and_user_tokens + completed_assistant_turns * output_tokens
+
+
+def format_length_summary(lengths: list[int]) -> str:
+    if not lengths:
+        return "none"
+    values = sorted(lengths)
+    return (
+        f"min={values[0]}, "
+        f"p50={values[len(values) // 2]}, "
+        f"p90={values[int((len(values) - 1) * 0.9)]}, "
+        f"max={values[-1]}"
+    )
 
 
 def main() -> None:
@@ -124,11 +153,18 @@ def main() -> None:
         raise ValueError("ShareGPT input must be a top-level JSON list")
 
     candidates: list[tuple[int, dict[str, Any]]] = []
+    screening_stats: Counter[str] = Counter()
+    screened_token_counts: list[int] = []
     for item in source:
         if not isinstance(item, dict):
+            screening_stats["invalid_item"] += 1
             continue
         pairs = extract_pairs(item.get("conversations"))
+        if not pairs:
+            screening_stats["invalid_or_empty_conversation"] += 1
+            continue
         if len(pairs) < args.min_turns:
+            screening_stats["fewer_than_min_turns"] += 1
             continue
 
         pairs = pairs[: args.max_turns]
@@ -140,12 +176,15 @@ def main() -> None:
                 break
             pairs.pop()
         if len(pairs) < args.min_turns:
+            screening_stats["above_max_tokens_at_min_turns"] += 1
             continue
 
         token_count = estimate_final_prompt_tokens(
             tokenizer, pairs, args.output_tokens
         )
+        screened_token_counts.append(token_count)
         if token_count < args.min_tokens:
+            screening_stats["below_min_tokens"] += 1
             continue
 
         conversations = [message for pair in pairs for message in pair]
@@ -155,6 +194,7 @@ def main() -> None:
                 {"id": item.get("id"), "conversations": conversations},
             )
         )
+        screening_stats["candidate"] += 1
 
     random_generator = random.Random(args.seed)
     random_generator.shuffle(candidates)
@@ -162,7 +202,9 @@ def main() -> None:
     if len(selected) < args.target:
         raise RuntimeError(
             f"Only {len(selected)} conversations matched the filters; "
-            f"requested {args.target}. Relax the token/turn limits."
+            f"requested {args.target}. Screening stats: "
+            f"{dict(screening_stats)}. Final candidate token lengths: "
+            f"{format_length_summary(screened_token_counts)}."
         )
 
     output_path = Path(args.output)
@@ -181,6 +223,7 @@ def main() -> None:
     total_requests = sum(len(item["conversations"]) // 2 for item in selected_items)
     print(f"Selected conversations: {len(selected_items)}")
     print(f"Total inference rounds: {total_requests}")
+    print(f"Screening stats: {dict(screening_stats)}")
     print(
         "Estimated final-prompt tokens: "
         f"min={min(selected_token_counts)}, "
