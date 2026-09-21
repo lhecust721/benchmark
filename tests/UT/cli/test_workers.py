@@ -17,7 +17,8 @@ from ais_bench.benchmark.cli.workers import (
     AccViz,
     PerfViz,
     WorkFlowExecutor,
-    WORK_FLOW
+    WORK_FLOW,
+    _finalize_response_anomaly_detection,
 )
 from ais_bench.benchmark.partitioners import NaivePartitioner
 from ais_bench.benchmark.runners import LocalRunner
@@ -310,6 +311,167 @@ class TestInfer:
 
         # 执行测试 - 不应抛出异常
         self.infer_worker._update_tasks_cfg(tasks, cfg)
+
+    @patch('ais_bench.benchmark.cli.workers.PARTITIONERS')
+    @patch('ais_bench.benchmark.cli.workers.RUNNERS')
+    @patch('ais_bench.benchmark.cli.workers.logger')
+    def test_do_work_starts_anomaly_detection_after_runner(self, mock_logger, mock_runners, mock_partitioners):
+        """启用检测时，协调器在 runner 完成后启动并串行等待完成（绑定 infer 阶段）"""
+        mock_partitioner = MagicMock()
+        mock_partitioners.build.return_value = mock_partitioner
+        mock_partitioner.return_value = []
+        mock_runner = MagicMock()
+        mock_runners.build.return_value = mock_runner
+
+        coordinator = MagicMock()
+        coordinator.is_running = False
+        coordinator.anomaly_report = {}
+        coordinator.summary = {'normal': 1}
+        self.infer_worker.response_anomaly_coordinator = coordinator
+
+        order = []
+        mock_runner.side_effect = lambda tasks: order.append('runner')
+        coordinator.start.side_effect = (
+            lambda cfg: order.append('coordinator.start')
+        )
+        coordinator.join.side_effect = lambda: order.append('coordinator.join')
+
+        cfg = MockConfigDict({
+            'infer': {'partitioner': {}, 'runner': {}},
+            'cli_args': MagicMock(merge_ds=False, mode='all'),
+            'work_dir': '/test/workdir',
+            'response_anomaly': {'enabled': True, 'payload_storage': {}},
+        })
+
+        with patch.object(self.infer_worker, '_update_tasks_cfg'):
+            self.infer_worker.do_work(cfg)
+
+        coordinator.start.assert_called_once_with(cfg)
+        coordinator.join.assert_called_once()
+        assert order == ['runner', 'coordinator.start', 'coordinator.join']
+
+    @patch('ais_bench.benchmark.cli.workers.TasksMonitor.rm_tmp_files')
+    @patch('ais_bench.benchmark.cli.workers._run_response_anomaly_monitor')
+    def test_finalize_anomaly_detection_runs_monitor_in_current_process(
+        self, mock_monitor, mock_rm_tmp_files
+    ):
+        """检测线程运行时，主线程同步展示专用状态看板。"""
+        coordinator = MagicMock()
+        coordinator.is_running = True
+        coordinator.task_names = ['ResponseAnomaly/model/dataset']
+        coordinator.summary = {}
+        coordinator.anomaly_report = {}
+        order = []
+        mock_monitor.side_effect = lambda *args: order.append('monitor')
+        coordinator.join.side_effect = lambda: order.append('join')
+
+        _finalize_response_anomaly_detection(
+            coordinator, '/test/workdir', False
+        )
+
+        mock_monitor.assert_called_once_with(
+            coordinator.task_names, '/test/workdir', False
+        )
+        assert order == ['monitor', 'join']
+        mock_rm_tmp_files.assert_called_once_with('/test/workdir')
+
+    @patch('ais_bench.benchmark.cli.workers.TasksMonitor.rm_tmp_files')
+    @patch('ais_bench.benchmark.cli.workers._run_response_anomaly_monitor')
+    @patch('ais_bench.benchmark.cli.workers.osp.isfile', return_value=False)
+    def test_finalize_anomaly_detection_without_status_only_joins(
+        self, mock_isfile, mock_monitor, mock_rm_tmp_files
+    ):
+        """检测未产生状态时不启动看板，仍等待线程并完成清理。"""
+        coordinator = MagicMock()
+        coordinator.is_running = False
+        coordinator.summary = {}
+        coordinator.anomaly_report = {}
+
+        _finalize_response_anomaly_detection(
+            coordinator, '/test/workdir', False
+        )
+
+        mock_monitor.assert_not_called()
+        coordinator.join.assert_called_once()
+        mock_rm_tmp_files.assert_called_once_with('/test/workdir')
+
+    @patch('ais_bench.benchmark.cli.workers.PARTITIONERS')
+    @patch('ais_bench.benchmark.cli.workers.RUNNERS')
+    @patch('ais_bench.benchmark.cli.workers.logger')
+    @patch('os.path.isfile', return_value=True)
+    @patch('os.remove', side_effect=OSError('permission denied'))
+    def test_do_work_warns_when_stale_anomaly_status_cannot_be_removed(
+        self,
+        mock_remove,
+        mock_isfile,
+        mock_logger,
+        mock_runners,
+        mock_partitioners,
+    ):
+        """旧状态清理失败时告警，但不阻断推理和异常检测。"""
+        mock_partitioner = MagicMock()
+        mock_partitioners.build.return_value = mock_partitioner
+        mock_partitioner.return_value = []
+        mock_runner = MagicMock()
+        mock_runners.build.return_value = mock_runner
+
+        coordinator = MagicMock()
+        coordinator.anomaly_report = {}
+        coordinator.summary = {'normal': 1}
+        self.infer_worker.response_anomaly_coordinator = coordinator
+        cfg = MockConfigDict({
+            'infer': {'partitioner': {}, 'runner': {}},
+            'cli_args': MagicMock(merge_ds=False, mode='all'),
+            'work_dir': '/test/workdir',
+            'response_anomaly': {'enabled': True},
+        })
+
+        with (
+            patch.object(self.infer_worker, '_update_tasks_cfg'),
+            patch(
+                'ais_bench.benchmark.cli.workers._run_response_anomaly_monitor'
+            ),
+            patch(
+                'ais_bench.benchmark.cli.workers.TasksMonitor.rm_tmp_files'
+            ),
+        ):
+            self.infer_worker.do_work(cfg)
+
+        mock_remove.assert_called_once()
+        mock_logger.warning.assert_any_call(
+            "Failed to remove stale response anomaly status file %s: %s",
+            '/test/workdir/status_tmp/tmp_ResponseAnomaly.json',
+            mock_remove.side_effect,
+        )
+        mock_runner.assert_called_once_with([])
+        coordinator.start.assert_called_once_with(cfg)
+        coordinator.join.assert_called_once()
+
+    @patch('ais_bench.benchmark.cli.workers.PARTITIONERS')
+    @patch('ais_bench.benchmark.cli.workers.RUNNERS')
+    @patch('ais_bench.benchmark.cli.workers.logger')
+    def test_do_work_skips_anomaly_detection_when_disabled(self, mock_logger, mock_runners, mock_partitioners):
+        """未启用检测时不启动协调器"""
+        mock_partitioner = MagicMock()
+        mock_partitioners.build.return_value = mock_partitioner
+        mock_partitioner.return_value = []
+        mock_runner = MagicMock()
+        mock_runners.build.return_value = mock_runner
+
+        coordinator = MagicMock()
+        coordinator.is_running = False
+        self.infer_worker.response_anomaly_coordinator = coordinator
+
+        cfg = MockConfigDict({
+            'infer': {'partitioner': {}, 'runner': {}},
+            'cli_args': MagicMock(merge_ds=False, mode='all'),
+            'work_dir': '/test/workdir',
+        })
+
+        with patch.object(self.infer_worker, '_update_tasks_cfg'):
+            self.infer_worker.do_work(cfg)
+
+        coordinator.start.assert_not_called()
 
 
 class TestEval:
@@ -878,3 +1040,140 @@ class TestJudgeInfer:
                 assert 'judge_infer_cfg' not in task['datasets'][0][0]
                 assert task['models'][0]['type'] == 'judge_model_type'
                 assert task['datasets'][0][0]['type'] == 'judge_dataset'
+
+
+class TestAgentEval:
+    """AgentEval._apply_cli_args 将 CLI 参数写入 cfg.models[*] / cfg.datasets[*].args。"""
+
+    def _make_args(self, **kwargs):
+        """构造一个 _apply_cli_args 关心的字段子集，其余用 MagicMock 兜底。"""
+        args = MagicMock()
+        args.agent = kwargs.get("agent")
+        args.agent_import_path = kwargs.get("agent_import_path")
+        args.agent_deps = kwargs.get("agent_deps")
+        args.model = kwargs.get("model")
+        args.api_base = kwargs.get("api_base")
+        args.agent_api_key = kwargs.get("agent_api_key")
+        args.agent_kwarg = kwargs.get("agent_kwarg")
+        args.agent_env = kwargs.get("agent_env")
+        # dataset-side
+        args.agent_dataset_path = kwargs.get("agent_dataset_path")
+        args.dataset = kwargs.get("dataset")
+        args.n_concurrent = kwargs.get("n_concurrent")
+        args.n_attempts = kwargs.get("n_attempts")
+        args.environment = kwargs.get("environment")
+        args.timeout_multiplier = kwargs.get("timeout_multiplier")
+        args.max_retries = kwargs.get("max_retries")
+        args.include_task_name = kwargs.get("include_task_name")
+        args.exclude_task_name = kwargs.get("exclude_task_name")
+        args.n_tasks = kwargs.get("n_tasks")
+        args.disable_verification = kwargs.get("disable_verification")
+        args.quiet = kwargs.get("quiet")
+        args.yes = kwargs.get("yes")
+        args.env_file = kwargs.get("env_file")
+        args.force_build = kwargs.get("force_build")
+        args.delete = kwargs.get("delete")
+        args.host_network = kwargs.get("host_network")
+        args.extra_docker_compose = kwargs.get("extra_docker_compose")
+        return args
+
+    def _make_worker(self, args):
+        # 引入 AgentEval（同模块的内部符号）
+        from ais_bench.benchmark.cli.workers import AgentEval
+        return AgentEval(args)
+
+    def test_apply_cli_args_with_extra_docker_compose_expect_writes_dataset_args(self):
+        """_apply_cli_args 收到 --extra-docker-compose 时，应写入 cfg.datasets[*].args.extra_docker_compose。"""
+        worker = self._make_worker(
+            self._make_args(extra_docker_compose=["/a.yaml", "/b.yaml"])
+        )
+        cfg = MockConfigDict({
+            "models": [{"abbr": "m"}],
+            "datasets": [{"abbr": "d", "args": {}}],
+            "work_dir": "/tmp",
+            "cli_args": MagicMock(debug=False),
+        })
+        worker._apply_cli_args(cfg)
+        assert cfg["datasets"][0]["args"]["extra_docker_compose"] == [
+            "/a.yaml", "/b.yaml",
+        ]
+
+    def test_apply_cli_args_without_extra_docker_compose_expect_skips_dataset_arg(self):
+        """_apply_cli_args 未收到 --extra-docker-compose 时，应在 dataset.args 中不注入该字段。"""
+        worker = self._make_worker(self._make_args(extra_docker_compose=None))
+        cfg = MockConfigDict({
+            "models": [{"abbr": "m"}],
+            "datasets": [{"abbr": "d", "args": {}}],
+            "work_dir": "/tmp",
+            "cli_args": MagicMock(debug=False),
+        })
+        worker._apply_cli_args(cfg)
+        assert "extra_docker_compose" not in cfg["datasets"][0]["args"]
+
+    def test_apply_cli_args_extra_docker_compose_expect_overrides_config_value(self):
+        """_apply_cli_args 同时收到 CLI 与 config 相同的 extra_docker_compose 时，应以 CLI 为准覆盖。"""
+        worker = self._make_worker(
+            self._make_args(extra_docker_compose=["/cli.yaml"])
+        )
+        cfg = MockConfigDict({
+            "models": [{"abbr": "m"}],
+            "datasets": [{
+                "abbr": "d",
+                "args": {"extra_docker_compose": ["/config.yaml"]},
+            }],
+            "work_dir": "/tmp",
+            "cli_args": MagicMock(debug=False),
+        })
+        worker._apply_cli_args(cfg)
+        assert cfg["datasets"][0]["args"]["extra_docker_compose"] == ["/cli.yaml"]
+
+    def test_apply_cli_args_repeated_ae_ak_expect_merges_all_pairs(self):
+        """重复 --ae/--ak 产生嵌套列表，_apply_cli_args 应合并全部 KEY=VALUE，而非只留最后一个。"""
+        worker = self._make_worker(
+            self._make_args(
+                agent_env=[
+                    ["ANTHROPIC_AUTH_TOKEN=sk-aaa"],
+                    ["ANTHROPIC_API_KEY=sk-bbb"],
+                    ["CLAUDE_CODE_EFFORT_LEVEL=max"],
+                    ["CLAUDE_CODE_MAX_OUTPUT_TOKENS=131072"],
+                ],
+                agent_kwarg=[
+                    ["disallowed_tools=WebSearch"],
+                    ["max_tokens=4096"],
+                ],
+            )
+        )
+        cfg = MockConfigDict({
+            "models": [{"abbr": "m"}],
+            "datasets": [],
+            "work_dir": "/tmp",
+            "cli_args": MagicMock(debug=False),
+        })
+        worker._apply_cli_args(cfg)
+        assert cfg["models"][0]["agent_env"] == {
+            "ANTHROPIC_AUTH_TOKEN": "sk-aaa",
+            "ANTHROPIC_API_KEY": "sk-bbb",
+            "CLAUDE_CODE_EFFORT_LEVEL": "max",
+            "CLAUDE_CODE_MAX_OUTPUT_TOKENS": "131072",
+        }
+        assert cfg["models"][0]["agent_kwargs"] == {
+            "disallowed_tools": "WebSearch",
+            "max_tokens": 4096,
+        }
+
+    def test_apply_cli_args_agent_env_expect_cli_wins_over_config(self):
+        """同一环境变量 config 与 CLI 都提供时，应以 CLI 值为准覆盖。"""
+        worker = self._make_worker(
+            self._make_args(agent_env=[["CLAUDE_CODE_MAX_OUTPUT_TOKENS=131072"]])
+        )
+        cfg = MockConfigDict({
+            "models": [{
+                "abbr": "m",
+                "agent_env": {"CLAUDE_CODE_MAX_OUTPUT_TOKENS": "8192"},
+            }],
+            "datasets": [],
+            "work_dir": "/tmp",
+            "cli_args": MagicMock(debug=False),
+        })
+        worker._apply_cli_args(cfg)
+        assert cfg["models"][0]["agent_env"]["CLAUDE_CODE_MAX_OUTPUT_TOKENS"] == "131072"

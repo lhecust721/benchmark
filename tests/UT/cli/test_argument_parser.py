@@ -37,6 +37,25 @@ class TestArgumentParser(unittest.TestCase):
         self.assertEqual(args.max_workers_per_gpu, 1)
         self.assertEqual(args.num_warmups, 1)
         self.assertIsNone(args.num_prompts)
+        self.assertIsNone(args.response_anomaly_payload_retention)
+
+    @patch('ais_bench.benchmark.cli.argument_parser.get_current_time_str')
+    def test_parse_args_response_anomaly_payload_retention(
+        self, mock_get_current_time_str
+    ):
+        mock_get_current_time_str.return_value = "20230516_144254"
+        for retention in ('all', 'anomalies', 'none'):
+            sys.argv = [
+                'benchmark.py',
+                '--response-anomaly-payload-retention',
+                retention,
+            ]
+
+            with self.subTest(retention=retention):
+                args = ArgumentParser().parse_args()
+                self.assertEqual(
+                    args.response_anomaly_payload_retention, retention
+                )
 
     @patch('ais_bench.benchmark.cli.argument_parser.get_current_time_str')
     def test_parse_args_with_config(self, mock_get_current_time_str):
@@ -159,6 +178,71 @@ class TestArgumentParser(unittest.TestCase):
         self.assertEqual(args.pressure_time, 30)
 
     @patch('ais_bench.benchmark.cli.argument_parser.get_current_time_str')
+    def test_parse_args_agent_dataset_path(self, mock_get_current_time_str):
+        """测试 agent 的 --agent-dataset-path 与 --agent-api-key 参数
+        （与 api_model 的 --path / --api-key 不冲突）"""
+        mock_get_current_time_str.return_value = "20230516_144254"
+        sys.argv = ['benchmark.py', '--agent-dataset-path', '/tmp/agent-ds',
+                    '--agent-api-key', 'sk-agent']
+        parser = ArgumentParser()
+        args = parser.parse_args()
+        self.assertEqual(args.agent_dataset_path, '/tmp/agent-ds')
+        self.assertEqual(args.agent_api_key, 'sk-agent')
+
+    @patch('ais_bench.benchmark.cli.argument_parser.get_current_time_str')
+    def test_agent_and_api_path_coexist(self, mock_get_current_time_str):
+        """agent 与 api_model 两套 path / api-key 参数可同时存在（不再冲突）"""
+        mock_get_current_time_str.return_value = "20230516_144254"
+        parser = ArgumentParser()  # 若能构造且不抛错即证明选项不冲突
+        sys.argv = ['benchmark.py', '--agent-dataset-path', '/a',
+                    '--path', '/b', '--agent-api-key', 'AKEY', '--api-key', 'KEY']
+        args = parser.parse_args()
+        self.assertEqual(args.agent_dataset_path, '/a')
+        self.assertEqual(args.path, '/b')
+        self.assertEqual(args.agent_api_key, 'AKEY')
+        self.assertEqual(args.api_key, 'KEY')
+
+    @patch('ais_bench.benchmark.cli.argument_parser.get_current_time_str')
+    def test_parse_args_extra_docker_compose_single_file_expect_single_element_list(
+        self, mock_get_current_time_str
+    ):
+        """parse_args 收到单个 --extra-docker-compose 时，应解析为单元素列表"""
+        mock_get_current_time_str.return_value = "20230516_144254"
+        sys.argv = [
+            'benchmark.py',
+            '--extra-docker-compose', '/path/to/overlay.yaml',
+        ]
+        args = ArgumentParser().parse_args()
+        self.assertEqual(args.extra_docker_compose, ['/path/to/overlay.yaml'])
+
+    @patch('ais_bench.benchmark.cli.argument_parser.get_current_time_str')
+    def test_parse_args_extra_docker_compose_repeated_flags_expect_accumulate_all_files(
+        self, mock_get_current_time_str
+    ):
+        """parse_args 收到多次 --extra-docker-compose（每次一个文件）时应累加所有文件（与 harbor CLI 行为一致）"""
+        mock_get_current_time_str.return_value = "20230516_144254"
+        sys.argv = [
+            'benchmark.py',
+            '--extra-docker-compose', '/a.yaml',
+            '--extra-docker-compose', '/b.yaml',
+            '--extra-docker-compose', '/c.yaml',
+        ]
+        args = ArgumentParser().parse_args()
+        self.assertEqual(
+            args.extra_docker_compose, ['/a.yaml', '/b.yaml', '/c.yaml']
+        )
+
+    @patch('ais_bench.benchmark.cli.argument_parser.get_current_time_str')
+    def test_parse_args_extra_docker_compose_omitted_expect_defaults_to_none(
+        self, mock_get_current_time_str
+    ):
+        """parse_args 未收到 --extra-docker-compose 时应默认为 None，不污染配置"""
+        mock_get_current_time_str.return_value = "20230516_144254"
+        sys.argv = ['benchmark.py']
+        args = ArgumentParser().parse_args()
+        self.assertIsNone(args.extra_docker_compose)
+
+    @patch('ais_bench.benchmark.cli.argument_parser.get_current_time_str')
     def test_parse_args_custom_dataset_options(self, mock_get_current_time_str):
         """测试自定义数据集相关选项参数解析"""
         # 模拟返回值
@@ -198,6 +282,72 @@ class TestArgumentParser(unittest.TestCase):
         self.assertEqual(args.custom_dataset_data_type, 'qa')
         self.assertEqual(args.custom_dataset_infer_method, 'gen')
 
+    @patch('ais_bench.benchmark.cli.argument_parser.get_current_time_str')
+    def test_parse_args_api_model_options(self, mock_get_current_time_str):
+        """测试API模型通用覆盖选项参数解析"""
+        mock_get_current_time_str.return_value = "20230516_144254"
+
+        sys.argv = [
+            'benchmark.py',
+            '--path', '/tmp/model',
+            '--model-name', 'Qwen',
+            '--request-rate', '10',
+            '--retry', '3',
+            '--api-key', 'sk-test',
+            '--host-ip', '127.0.0.1',
+            '--host-port', '8000',
+            '--url', 'http://example.com/v1',
+            '--max-out-len', '256',
+            '--batch-size', '4',
+            '--trust-remote-code',
+            '--generation-kwargs', '{"temperature": 0.5, "ignore_eos": false}',
+        ]
+
+        parser = ArgumentParser()
+        args = parser.parse_args()
+
+        self.assertEqual(args.path, '/tmp/model')
+        self.assertEqual(args.model_name, 'Qwen')
+        self.assertEqual(args.request_rate, 10.0)
+        self.assertEqual(args.retry, 3)
+        self.assertEqual(args.api_key, 'sk-test')
+        self.assertEqual(args.host_ip, '127.0.0.1')
+        self.assertEqual(args.host_port, 8000)
+        self.assertEqual(args.url, 'http://example.com/v1')
+        self.assertEqual(args.max_out_len, 256)
+        self.assertEqual(args.batch_size, 4)
+        self.assertTrue(args.trust_remote_code)
+        self.assertEqual(args.generation_kwargs,
+                         {'temperature': 0.5, 'ignore_eos': False})
+
+    @patch('ais_bench.benchmark.cli.argument_parser.get_current_time_str')
+    def test_parse_args_api_model_options_default_none(self, mock_get_current_time_str):
+        """未显式指定时 api_model 覆盖参数默认均为 None"""
+        mock_get_current_time_str.return_value = "20230516_144254"
+
+        sys.argv = ['benchmark.py']
+        args = ArgumentParser().parse_args()
+
+        for attr in ('path', 'model_name', 'request_rate', 'retry', 'api_key',
+                     'host_ip', 'host_port', 'url', 'max_out_len', 'batch_size',
+                     'trust_remote_code', 'generation_kwargs'):
+            self.assertIsNone(getattr(args, attr))
+
+    @patch('ais_bench.benchmark.cli.argument_parser.get_current_time_str')
+    def test_parse_args_api_model_no_trust_remote_code(self, mock_get_current_time_str):
+        """测试 --no-trust-remote-code 关闭信任远程代码"""
+        mock_get_current_time_str.return_value = "20230516_144254"
+
+        sys.argv = ['benchmark.py', '--no-trust-remote-code']
+        args = ArgumentParser().parse_args()
+        self.assertFalse(args.trust_remote_code)
+
+    def test_parse_args_api_model_invalid_generation_kwargs_json(self):
+        """非法 JSON 的 --generation-kwargs 应导致解析失败"""
+        sys.argv = ['benchmark.py', '--generation-kwargs', '{bad json']
+        with self.assertRaises(SystemExit):
+            ArgumentParser().parse_args()
+
     def test_init_method_creates_parser(self):
         """测试初始化方法创建了解析器并添加了所有参数组"""
         parser = ArgumentParser()
@@ -214,6 +364,10 @@ class TestArgumentParser(unittest.TestCase):
             self.assertTrue(hasattr(args, 'merge_ds'))  # accuracy_args
             self.assertTrue(hasattr(args, 'pressure'))  # perf_args
             self.assertTrue(hasattr(args, 'custom_dataset_path'))  # custom_dataset_args
+            self.assertTrue(hasattr(args, 'model_name'))  # api_model_args
+            self.assertTrue(hasattr(args, 'host_port'))  # api_model_args
+            self.assertTrue(hasattr(args, 'generation_kwargs'))  # api_model_args
+            self.assertTrue(hasattr(args, 'trust_remote_code'))  # api_model_args
 
 
 if __name__ == '__main__':

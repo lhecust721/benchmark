@@ -68,6 +68,32 @@ class GenInferencerOutputHandler(BaseInferencerOutputHandler):
                 else output
             ),
         }
+        if isinstance(output, Output) and output.extra_details_data.get('response_anomaly_payload'):
+            result_data['response_anomaly_payload'] = output.extra_details_data['response_anomaly_payload']
+
+        if isinstance(output, Output):
+            result_data["input_tokens"] = output.input_tokens
+            result_data["output_tokens"] = output.output_tokens
+            if output.origin_logprobs:
+                result_data["origin_logprobs"] = output.origin_logprobs
+
+        # When the model emits reasoning, ``prediction`` concatenates
+        # ``reasoning_content + "\n\n" + content`` (see Output.get_prediction).
+        # Keep the reasoning-free final content separately so downstream
+        # judge datasets (e.g. CorpusQA) can evaluate exactly the answer
+        # the official evaluation scripts would see (the API ``content``
+        # field).
+        if isinstance(output, Output) and output.reasoning_content:
+            result_data["content"] = output.content
+
+        # When the model emits reasoning, ``prediction`` concatenates
+        # ``reasoning_content + "\n\n" + content`` (see
+        # ``Output.get_prediction``).  Keep the reasoning-free final content
+        # separately so downstream evaluators that must grade exactly the
+        # answer text returned by the chat API (e.g. MRCR's prefix gate +
+        # SequenceMatcher grading) are not confused by reasoning drafts.
+        if isinstance(output, Output) and output.reasoning_content:
+            result_data["content"] = output.content
 
         if gold:
             result_data["gold"] = gold

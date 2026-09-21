@@ -50,6 +50,10 @@ def parse_requirements(fname='requirements.txt', with_version=True):
         else:
             info = {'line': line}
             if line.startswith('-e '):
+                if '#egg=' not in line:
+                    # editable local/git path without an egg fragment (e.g.
+                    # "-e ../../harbor"): not a PyPI dependency, skip it.
+                    return
                 info['package'] = line.split('#egg=')[1]
             else:
                 # Remove versioning from the package
@@ -173,11 +177,17 @@ def do_setup():
             'ocrbench_v2':
             parse_requirements('requirements/datasets/ocrbench_v2.txt') +
             parse_requirements('requirements/runtime.txt'),
+            'response_anomaly':
+            parse_requirements('requirements/response_anomaly.txt') +
+            parse_requirements('requirements/runtime.txt'),
+            'agent':
+            parse_requirements('requirements/agent.txt'),
             'full':
             parse_requirements('requirements/extra.txt') +
             parse_requirements('requirements/api.txt') +
             parse_requirements('requirements/hf_vl_dependency.txt') +
             parse_requirements('requirements/datasets/bfcl_dependencies.txt') +
+            parse_requirements('requirements/response_anomaly.txt') +
             parse_requirements('requirements/runtime.txt'),
         },
         license='Apache License 2.0',
@@ -204,6 +214,8 @@ def do_setup():
         entry_points={
             'console_scripts': [
                 'ais_bench = ais_bench.benchmark.cli.main:main',
+                'ais_bench-gen-response-anomaly-config = '
+                'ais_bench.tools.response_anomaly.gen_model_config:main',
             ],
         },
     )

@@ -13,12 +13,13 @@ IFBench 是一个用于评估 AI 模型在遵循新颖、具有挑战性且多�
 ## 数据集部署
 
 - 可以从 Hugging Face 的数据集链接 🔗 [https://huggingface.co/datasets/allenai/IFBench_test](https://huggingface.co/datasets/allenai/IFBench_test) 中获取数据集。
-- IFBench 数据集为 Parquet 格式，建议部署在 `{tool_root_path}/ais_bench/datasets/ifbench/data/` 目录下。
+- IFBench 数据集为 Parquet 格式，建议部署在 `{tool_root_path}/ais_bench/datasets/IFBench_test/data/` 目录下。
 
-- 在 `{tool_root_path}/ais_bench/datasets/ifbench/data/` 目录下执行 `ls -la` 检查目录结构。如果目录结构如下所示，则数据集部署成功：
+- 在 `{tool_root_path}/ais_bench/datasets/` 目录下执行 `tree IFBench_test/` 检查目录结构。如果目录结构如下所示，则数据集部署成功：
     ```
-    {tool_root_path}/ais_bench/datasets/ifbench/data/
-    └── train-00000-of-00001.parquet
+    IFBench_test/
+    └── data/
+        └── train-00000-of-00001.parquet
     ```
 
 
@@ -34,10 +35,10 @@ IFBench 是一个用于评估 AI 模型在遵循新颖、具有挑战性且多�
 
 ### 1. 安装依赖
 
-下载 pyarrow 依赖：
+读取 `requirements/datasets/IFBench_test.txt` 文件中的依赖列表，安装所需依赖：
 
 ```shell
-pip install pyarrow==15.0.0
+pip install -r requirements/datasets/IFBench_test.txt
 ```
 
 ### 2. 下载 NLTK 数据包
@@ -60,7 +61,7 @@ export NLTK_DATA=/workspace/nltk_data
 
 ### 3. 模型配置修改
 
-若使用此数据集，需要在 `vllm_api_general_chat.py` 中同时修改引入语句和 `pred_postprocessor` 后处理函数：
+若用此数据集，需要在 `vllm_api_general_chat.py` 中同时修改引入语句和 `pred_postprocessor` 后处理函数：
 
 ```python
 # 修改前
