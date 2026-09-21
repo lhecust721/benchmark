@@ -192,11 +192,23 @@ class VLLMCustomAPIChat(BaseAPIModel):
             output.output_tokens = json_content["usage"].get("completion_tokens", 0)
 
     async def parse_stream_response(self, json_content, output):
+        # [KV-divergence diagnostic] Capture vLLM token-id extensions for
+        # offline prefix-reuse replay analysis. With return_token_ids=True the
+        # first stream chunk carries the server-rendered prompt_token_ids and
+        # every chunk carries the delta token ids on choices[i].token_ids.
+        if json_content.get("prompt_token_ids") is not None:
+            output.extra_details_data["prompt_token_ids"] = json_content["prompt_token_ids"]
+            # Reset per attempt so proxy retries do not duplicate deltas.
+            output.extra_details_data["gen_token_ids"] = []
+        if json_content.get("id") and "response_id" not in output.extra_details_data:
+            output.extra_details_data["response_id"] = json_content["id"]
         for item in json_content.get("choices", []):
             if item["delta"].get("content"):
                 output.content += item["delta"]["content"]
             if reasoning := item["delta"].get("reasoning_content") or item["delta"].get("reasoning"):
                 output.reasoning_content += reasoning
+            if item.get("token_ids"):
+                output.extra_details_data.setdefault("gen_token_ids", []).extend(item["token_ids"])
         await self._parse_usage(json_content, output)
 
     async def _parse_logprobs(self, choice: dict, output: Output) -> None:
@@ -212,11 +224,20 @@ class VLLMCustomAPIChat(BaseAPIModel):
         output.origin_logprobs = lp.get("content") or []
 
     async def parse_text_response(self, json_content, output):
+        # [KV-divergence diagnostic] Non-stream counterpart: the full
+        # response carries prompt_token_ids (top level) and the complete
+        # generated token ids on choices[i].token_ids.
+        if json_content.get("prompt_token_ids") is not None:
+            output.extra_details_data["prompt_token_ids"] = json_content["prompt_token_ids"]
+        if json_content.get("id"):
+            output.extra_details_data["response_id"] = json_content["id"]
         for item in json_content.get("choices", []):
             if content:=item["message"].get("content"):
                 output.content += content
             if reasoning_content:=item["message"].get("reasoning_content") or item["message"].get("reasoning"):
                 output.reasoning_content += reasoning_content
+            if item.get("token_ids"):
+                output.extra_details_data["gen_token_ids"] = item["token_ids"]
             await self._parse_logprobs(item, output)
         await self._parse_usage(json_content, output)
         output.update_extra_details_data_from_text_response(json_content)

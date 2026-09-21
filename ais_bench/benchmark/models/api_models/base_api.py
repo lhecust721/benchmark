@@ -963,4 +963,13 @@ class APITemplateParser:
                 MODEL_CODES.INVALID_PROMPT_CONTENT,
                 "Invalid prompt content: without 'prompt' or 'prompt_mm' param!",
             )
+        # [KV-reuse fix] Pass through extra fields (e.g. 'reasoning' set by
+        # MultiTurnGenInferencer.infer_every and merged into role_dict by
+        # _update_role_dict) so that get_request_body can forward them on
+        # the assistant message. Check merged_prompt (the updated role_dict
+        # entry containing actual message content) rather than role_prompt
+        # (the template definition without extra fields).
+        for key in ("reasoning", "reasoning_content"):
+            if merged_prompt.get(key):
+                res[key] = merged_prompt[key]
         return res, True

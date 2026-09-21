@@ -153,6 +153,15 @@ class MultiTurnGenInferencer(BaseApiInferencer, BaseLocalInferencer):
             if output.success:
                 await self.status_counter.rev()
                 chat[i]["prompt"] = output.content
+                # [KV-reuse fix] 思考模式下回填 reasoning (drop_thinking=false 跨轮复用三条件之一)。
+                # get_request_body 的消息构造会把 chat[i] 中除 role/prompt 外的所有字段
+                # 透传到 assistant 消息 → reasoning 字段随消息体下发, 服务端模板将其渲染为
+                # <think>{reasoning}</think>{content}<EOS>, 与 decode 保存序列 token 级对齐。
+                reasoning = getattr(output, 'reasoning_content', None)
+                if isinstance(reasoning, list):
+                    reasoning = "".join(reasoning)
+                if reasoning:
+                    chat[i]["reasoning"] = reasoning
                 await self.status_counter.finish()
                 await self.output_handler.report_cache_info(index, history, output, data_abbr, gold)
             else: # Exit the current for loop; if it fails, subsequent rounds will no longer send requests.
