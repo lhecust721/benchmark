@@ -118,20 +118,21 @@ def section(title: str) -> None:
     print(f"\n{'=' * 24} {title} {'=' * 24}")
 
 
-def tokenize_prompt_via_server(base: str, prompt: str) -> list[int]:
+def tokenize_prompt_via_server(tokenize_url: str, prompt: str, model: str) -> list[int]:
     r = requests.post(
-        f"{base}/tokenize",
-        json={"model": args.model, "prompt": prompt, "add_special_tokens": False},
+        tokenize_url,
+        json={"model": model, "prompt": prompt, "add_special_tokens": False},
         timeout=60,
     )
     r.raise_for_status()
     return r.json()["tokens"]
 
 
-def tokenize_messages_via_server(base: str, messages: list[dict], kwargs: dict) -> list[int]:
+def tokenize_messages_via_server(tokenize_url: str, messages: list[dict], kwargs: dict,
+                                 model: str) -> list[int]:
     r = requests.post(
-        f"{base}/tokenize",
-        json={"model": args.model, "messages": messages, "chat_template_kwargs": kwargs},
+        tokenize_url,
+        json={"model": model, "messages": messages, "chat_template_kwargs": kwargs},
         timeout=60,
     )
     r.raise_for_status()
@@ -217,8 +218,8 @@ def main() -> None:
 
     # ---------- [2] 服务端渲染对照 ----------
     section("[2] 服务端 /tokenize 渲染对照 (prompt 字符串 + messages 双路径)")
-    ids1_prompt = tokenize_prompt_via_server(tokenize_url, p1)
-    ids1_msg = tokenize_messages_via_server(tokenize_url, messages1, kwargs_nothink)
+    ids1_prompt = tokenize_prompt_via_server(tokenize_url, p1, args.model)
+    ids1_msg = tokenize_messages_via_server(tokenize_url, messages1, kwargs_nothink, args.model)
     print(f"offline ids == server(prompt)  : {ids1_offline == ids1_prompt}")
     print(f"offline ids == server(messages): {ids1_offline == ids1_msg}")
     print(f"server(prompt) == server(messages): {ids1_prompt == ids1_msg}")
@@ -305,7 +306,7 @@ def main() -> None:
     ]
     p2 = tok.apply_chat_template(messages2, tokenize=False, add_generation_prompt=True,
                                  **kwargs_nothink)
-    ids2 = tokenize_messages_via_server(tokenize_url, messages2, kwargs_nothink)
+    ids2 = tokenize_messages_via_server(tokenize_url, messages2, kwargs_nothink, args.model)
 
     print("第2轮渲染完整字符串 (repr, 截断 400 字符):")
     print(repr(p2[:200] + " ... " + p2[-200:] if len(p2) > 400 else p2))
@@ -402,7 +403,7 @@ def main() -> None:
     ]
     p2b = tok.apply_chat_template(messages2b, tokenize=False, add_generation_prompt=True,
                                   **kwargs_nothink)
-    ids2b = tokenize_messages_via_server(tokenize_url, messages2b, kwargs_nothink)
+    ids2b = tokenize_messages_via_server(tokenize_url, messages2b, kwargs_nothink, args.model)
 
     expected_b = saved_prompt_ids + gen_ids_b
     m_b = lcp_len(expected_b, ids2b)

@@ -88,11 +88,12 @@ def section(title: str) -> None:
     print(f"\n{'=' * 24} {title} {'=' * 24}")
 
 
-def tokenize_chat_via_server(base: str, messages: list[dict], chat_template_kwargs: dict) -> list[int]:
+def tokenize_chat_via_server(tokenize_url: str, messages: list[dict], chat_template_kwargs: dict,
+                             model: str) -> list[int]:
     r = requests.post(
-        f"{base}/tokenize",
+        tokenize_url,
         json={
-            "model": args.model,
+            "model": model,
             "messages": messages,
             "chat_template_kwargs": chat_template_kwargs,
         },
@@ -147,15 +148,15 @@ def ids_to_strs(tok, ids: list[int]) -> str:
 def analyze_variant(
     name: str,
     tok,
-    base: str,
+    tokenize_url: str,
+    model: str,
     messages2: list[dict],
     kwargs: dict,
     expected: list[int],
-    kwargs_nothink: dict,
 ) -> str:
     p2 = tok.apply_chat_template(messages2, tokenize=False, add_generation_prompt=True, **kwargs)
     ids2_offline = tok.encode(p2, add_special_tokens=False)
-    ids2_server = tokenize_chat_via_server(tokenize_url, messages2, kwargs)
+    ids2_server = tokenize_chat_via_server(tokenize_url, messages2, kwargs, model)
     ids2 = ids2_server
 
     m = lcp_len(expected, ids2)
@@ -210,7 +211,7 @@ def main() -> None:
     ]
     p1 = tok.apply_chat_template(messages1, tokenize=False, add_generation_prompt=True,
                                  **kwargs_thinking)
-    ids1 = tokenize_chat_via_server(tokenize_url, messages1, kwargs_thinking)
+    ids1 = tokenize_chat_via_server(tokenize_url, messages1, kwargs_thinking, args.model)
     print(f"渲染头部 100 字符: {repr(p1[:100])}")
     print(f"渲染尾部 120 字符: {repr(p1[-120:])}")
     print(f"以 <|assistant|><think> 结尾(模板注入): {p1.endswith(ASSISTANT + THINK_START)}")
@@ -320,29 +321,29 @@ def main() -> None:
 
     # V-A: 默认 (clear_thinking 未定义), 仅回传 content → 渲染 <think></think>
     analyze_variant("V-A: 默认(clear_thinking未定义) + 仅content",
-                    tok, base, messages2_base, kwargs_thinking, expected, kwargs_nothink)
+                    tok, tokenize_url, args.model, messages2_base, kwargs_thinking, expected)
 
     # V-E: 默认 + reasoning_content 字段 (证明默认丢弃思考)
     v_e = [dict(m) for m in messages2_base]
     v_e[2] = {"role": "assistant", "content": content, "reasoning_content": reasoning}
     analyze_variant("V-E: 默认(clear_thinking未定义) + reasoning_content字段",
-                    tok, base, v_e, kwargs_thinking, expected, kwargs_nothink)
+                    tok, tokenize_url, args.model, v_e, kwargs_thinking, expected)
 
     # V-C: clear_thinking=false, 仅回传 content (无 reasoning_content → 仍空思考)
     analyze_variant("V-C: clear_thinking=false + 仅content",
-                    tok, base, messages2_base, kwargs_full, expected, kwargs_nothink)
+                    tok, tokenize_url, args.model, messages2_base, kwargs_full, expected)
 
     # V-B: clear_thinking=false + reasoning_content 字段 (完整回传思考, 三条件齐)
     v_b = [dict(m) for m in messages2_base]
     v_b[2] = {"role": "assistant", "content": content, "reasoning_content": reasoning}
     p_b = analyze_variant("V-B: clear_thinking=false + reasoning_content字段 (完整回传)",
-                          tok, base, v_b, kwargs_full, expected, kwargs_nothink)
+                          tok, tokenize_url, args.model, v_b, kwargs_full, expected)
 
     # V-F: clear_thinking=false + reasoning 字段 (DSV4 风格字段名, GLM 模板不读取)
     v_f = [dict(m) for m in messages2_base]
     v_f[2] = {"role": "assistant", "content": content, "reasoning": reasoning}
     analyze_variant("V-F: clear_thinking=false + reasoning字段 (GLM模板不读取, 对照)",
-                    tok, base, v_f, kwargs_full, expected, kwargs_nothink)
+                    tok, tokenize_url, args.model, v_f, kwargs_full, expected)
 
     # ---------- [3b] 真实 chat API 回填实证 + 首次跨轮查询 ----------
     section("[3b] 真实 chat API 回填 (V-B 消息) + 首次跨轮 KV 查询")
